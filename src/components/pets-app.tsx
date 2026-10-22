@@ -11,7 +11,7 @@ import { AccountPanel } from "@/components/account-panel";
 import { VerifyAccount } from "@/components/verify-account";
 import { PixelPet } from "@/components/pixel-pet";
 import { PwaControls } from "@/components/pwa-controls";
-import { ACTIONS, applyAction, evolvePet, isTheme, petMood, THEMES, type GamePet, type PetAction, type ThemeName } from "@/lib/game";
+import { ACTIONS, PERSONALITIES, actionBlocked, applyAction, evolvePet, personalityOf, petWant, skyDim, sleepsUntil, growthScale, isTheme, THEMES, type GamePet, type PetAction, type ThemeName } from "@/lib/game";
 
 const demo: GamePet = {
   id: "preview", name: "Pipoca", hunger: 78, happiness: 92, energy: 65, cleanliness: 84,
@@ -34,17 +34,40 @@ export function PetsApp({ verification = "", verificationToken }: { verification
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [effect, setEffect] = useState("");
+  const [speaking, setSpeaking] = useState(false);
   const [clock, setClock] = useState(0);
   const [theme, setTheme] = useState<ThemeName>("meadow");
   const [petColor, setPetColor] = useState(demo.petColor);
   const [backgroundColor, setBackgroundColor] = useState(demo.backgroundColor);
   const [petName, setPetName] = useState("");
   const themeConfig = THEMES[theme];
-  const stats = authenticated && hasPet && clock ? evolvePet(pet, pet.updatedAt, new Date(clock)) : pet;
+  const dim = clock ? skyDim(clock) : 0;
+  const isNight = themeConfig.night || dim >= 0.3;
+  const tz = -new Date().getTimezoneOffset();
+  const stats = authenticated && hasPet && clock ? evolvePet(pet, pet.updatedAt, new Date(clock), pet.id, tz) : pet;
+  const nowMs = clock || Date.parse(pet.updatedAt);
+  const want = clock ? petWant(stats, pet.id, nowMs, tz) : "play";
+  const asleep = want === "sleep";
+  const personality = PERSONALITIES[personalityOf(pet.id)];
+  const wakeTime = asleep ? new Date(sleepsUntil(pet.id, nowMs, tz)).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }) : "";
+  const blockedFor = (action: PetAction) => !clock ? null : actionBlocked(stats, pet.id, action, nowMs, tz);
+  const statusText = { sleep: "💤 Dormindo", feed: "Com fome", play: "Quer brincar", quiet: "Quietinho", clean: "Precisa de banho" }[want];
+  const wantText = { sleep: "Zzz… dormindo", feed: "Quero comer! ♡", play: "Vamos brincar? ✦", quiet: "Quero ficar quietinho… ✧", clean: "Preciso de um banho! ✨" }[want];
+
+  const growth = authenticated && hasPet ? growthScale(pet.createdAt, clock || Date.parse(pet.updatedAt)) : 1;
+
+  const clockOn = clock > 0;
+  useEffect(() => {
+    if (!clockOn || asleep) return;
+    const start = setTimeout(() => setSpeaking(true), 0);
+    const stop = setTimeout(() => setSpeaking(false), 7000);
+    return () => { clearTimeout(start); clearTimeout(stop); setSpeaking(false); };
+  }, [want, asleep, clockOn]);
 
   useEffect(() => {
     const timer = setInterval(() => setClock(Date.now()), 30_000);
-    return () => clearInterval(timer);
+    const first = setTimeout(() => setClock(Date.now()), 0);
+    return () => { clearInterval(timer); clearTimeout(first); };
   }, []);
 
   useEffect(() => {
@@ -53,7 +76,7 @@ export function PetsApp({ verification = "", verificationToken }: { verification
     async function load() {
       setLoading(true);
       try {
-        const response = await fetch("/api/pet", { cache: "no-store" });
+        const response = await fetch(`/api/pet?tz=${tz}`, { cache: "no-store" });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Não foi possível carregar seu pet.");
         if (!cancelled && data.pet) {
@@ -70,12 +93,12 @@ export function PetsApp({ verification = "", verificationToken }: { verification
     }
     void load();
     return () => { cancelled = true; };
-  }, [authenticated]);
+  }, [authenticated, tz]);
 
   async function mutate(body: object, method = "PATCH") {
     setBusy(true); setMessage("");
     try {
-      const response = await fetch("/api/pet", { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const response = await fetch("/api/pet", { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, tz }) });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Não foi possível salvar.");
       setPet(data.pet); setHasPet(true); setClock(Date.parse(data.pet.updatedAt));
@@ -89,6 +112,8 @@ export function PetsApp({ verification = "", verificationToken }: { verification
 
   async function perform(action: PetAction) {
     if (!ACTIONS.includes(action)) return;
+    const refused = blockedFor(action);
+    if (refused) { setMessage(refused); return; }
     if (!authenticated) {
       setPet((previous) => applyAction(previous, action));
       setMessage("Você está no modo demonstração. Crie sua conta para salvar a aventura.");
@@ -101,13 +126,13 @@ export function PetsApp({ verification = "", verificationToken }: { verification
     setTheme(next); setPetColor(THEMES[next].pet); setBackgroundColor(THEMES[next].sky);
   }
 
-  const css = { "--world-sky": backgroundColor, "--world-ground": themeConfig.ground, "--world-accent": themeConfig.accent } as CSSProperties;
+  const css = { "--world-sky": backgroundColor, "--world-ground": themeConfig.ground, "--world-accent": themeConfig.accent, "--world-dim": themeConfig.night ? 0 : dim } as CSSProperties;
 
   return (
     <div className="site-shell">
       <header className="site-header">
         <Link href="/" className="brand" aria-label="BeMagic Pets, início"><span className="brand-mark"><PawPrint size={23} /></span><span>bemagic<span className="brand-pets">pets</span><span className="brand-dot">✦</span></span></Link>
-        <nav aria-label="Navegação principal"><a href="#como-funciona">Como funciona</a><a href="#personalizar">Seu estilo</a></nav>
+        <nav aria-label="Navegação principal"><a href="#como-funciona">Como funciona</a><a href="#configuracoes">Configurações</a></nav>
         {authenticated ? <Button variant="outline" size="sm" onClick={() => void signOut({ callbackUrl: "/" })}><LogOut /> Sair</Button> : <Button asChild size="sm"><a href="#conta">Meu cantinho <ArrowRight /></a></Button>}
       </header>
 
@@ -129,16 +154,16 @@ export function PetsApp({ verification = "", verificationToken }: { verification
 
         <section className="game-grid" aria-label="Seu pet e cuidados">
           <Card className="pet-card">
-            <div className="world-toolbar"><span><span className="status-dot" /> {themeConfig.name}</span><span>{themeConfig.night ? <Moon size={15} /> : <Sun size={15} />} {themeConfig.night ? "Noite mágica" : "Um lindo dia"}</span></div>
-            <div className={`pet-world ${themeConfig.night ? "night" : ""}`} style={css}>
+            <div className="world-toolbar"><span><span className="status-dot" /> {themeConfig.name}</span><span>{isNight ? <Moon size={15} /> : <Sun size={15} />} {isNight ? "Noite mágica" : dim > 0 ? "Entre dia e noite" : "Um lindo dia"}</span></div>
+            <div className={`pet-world ${isNight ? "night" : ""}`} style={css}>
               <div className="world-sun" /><div className="cloud cloud-one" /><div className="cloud cloud-two" />
               <div className="world-mountain mountain-one" /><div className="world-mountain mountain-two" />
               <div className="world-ground" /><div className="pixel-flower flower-one">✿</div><div className="pixel-flower flower-two">✿</div><div className="pixel-flower flower-three">✿</div>
-              <div className="pet-bubble">{effect === "feed" ? "Nhac, nhac! ♡" : effect === "play" ? "Uhuu! ✦" : effect === "sleep" ? "Zzz… ✧" : effect === "clean" ? "Plim! ✨" : petMood(stats) === "Feliz da vida" ? "Oi, vamos ser amigos? ♡" : "Um carinho, por favor? ♡"}</div>
-              <div className={`pet-sprite ${effect ? "pet-celebrate" : ""}`}><PixelPet color={petColor} sleepy={effect === "sleep"} /><div className="pet-shadow" /></div>
+              {!asleep && (speaking || effect) && <div className="pet-bubble">{effect === "feed" ? "Nhac, nhac! ♡" : effect === "play" ? "Uhuu! ✦" : effect === "sleep" ? "Zzz… ✧" : effect === "clean" ? "Plim! ✨" : wantText}</div>}
+              <div className={`pet-sprite ${effect ? "pet-celebrate" : ""}`}><div style={{ transform: `scale(${growth})`, transformOrigin: "bottom center", transition: "transform 1s" }}>{asleep && <div className="zzz" aria-hidden><span>z</span><span>Z</span><span>Z</span></div>}<PixelPet color={petColor} sleepy={asleep || effect === "sleep"} /><div className="pet-shadow" /></div></div>
               <div className="world-caption"><Leaf size={12} /> Aqui, os pequenos momentos importam.</div>
             </div>
-            <div className="pet-profile"><div><h3>{authenticated && hasPet ? pet.name : "Pipoca"} <Heart size={17} /></h3><p>{authenticated && hasPet ? `Seu companheiro desde ${new Date(pet.createdAt).toLocaleDateString("pt-BR")}` : "Seu futuro companheiro de aventuras"}</p></div><span className="mood-tag">{petMood(stats)}</span></div>
+            <div className="pet-profile"><div><h3>{authenticated && hasPet ? pet.name : "Pipoca"} <Heart size={17} /></h3><p>{authenticated && hasPet ? `${personality.name} · companheiro desde ${new Date(pet.createdAt).toLocaleDateString("pt-BR")}` : "Seu futuro companheiro de aventuras"}</p></div><span className="mood-tag" role="status">{statusText}</span></div>
           </Card>
 
           <div className="care-column">
@@ -154,16 +179,16 @@ export function PetsApp({ verification = "", verificationToken }: { verification
               </CardContent>
             </Card>
             <div className="care-actions">
-              {care.map(({ action, label, hint, icon: Icon, color }) => <button key={action} className={`care-button ${color}`} disabled={busy || loading || (authenticated && !hasPet)} onClick={() => void perform(action)}><span className="care-icon"><Icon size={22} /></span><strong>{label}</strong><small>{hint}</small></button>)}
+              {care.map(({ action, label, hint, icon: Icon, color }) => <button key={action} className={`care-button ${color}`} disabled={busy || loading || (authenticated && !hasPet) || !!blockedFor(action)} onClick={() => void perform(action)}><span className="care-icon"><Icon size={22} /></span><strong>{label}</strong><small>{hint}</small></button>)}
             </div>
             <p className="care-note"><Heart size={13} /> Sem pressa, sem competição. Só cuidado.</p>
           </div>
         </section>
-        <p className="game-message" role="status">{loading ? "Buscando seu pequeno amigo…" : message || (authenticated && hasPet ? "Seu pet continua precisando de cuidados mesmo quando você sai. Um cuidado a cada 10 segundos." : "Experimente os cuidados e as cores. Seu pet de verdade espera por você!")}</p>
+        <p className="game-message" role="status">{loading ? "Buscando seu pequeno amigo…" : message || (asleep ? `${authenticated && hasPet ? pet.name : "Pipoca"} está dormindo e acorda por volta das ${wakeTime}. Shhh…` : null) || (authenticated && hasPet ? "Seu pet continua precisando de cuidados mesmo quando você sai. Um cuidado a cada 10 segundos." : "Experimente os cuidados e as cores. Seu pet de verdade espera por você!")}</p>
 
         {authenticated && !hasPet && !loading && <Card className="adopt-card"><CardHeader><CardTitle>Como vai se chamar seu novo amigo?</CardTitle></CardHeader><CardContent><form className="adopt-form" onSubmit={(event) => { event.preventDefault(); void mutate({ name: petName || "Pipoca", theme, petColor, backgroundColor }, "POST"); }}><Input aria-label="Nome do pet" value={petName} onChange={(event) => setPetName(event.target.value)} placeholder="Pipoca" minLength={1} maxLength={24} /><Button disabled={busy}><PawPrint /> Adotar meu pet</Button></form></CardContent></Card>}
 
-        <section id="personalizar" className="customize-section">
+        <section id="configuracoes" className="customize-section">
           <div className="customize-heading"><span className="palette-badge"><Palette size={21} /></span><div><h2>Seu mundo, suas cores.</h2><p>Uma pitada do seu estilo deixa tudo mais especial.</p></div><span className="tiny-label">FEITO DO SEU JEITINHO</span></div>
           <div className="theme-options" role="group" aria-label="Temas do cenário">
             {(Object.keys(THEMES) as ThemeName[]).map((key) => <button key={key} aria-pressed={theme === key} className={`theme-option ${theme === key ? "selected" : ""}`} onClick={() => chooseTheme(key)}><span className="theme-preview" style={{ background: THEMES[key].sky, borderBottomColor: THEMES[key].ground }}><span style={{ background: THEMES[key].pet }} />{theme === key && <span className="theme-check"><Check size={12} /></span>}</span><span>{THEMES[key].name}</span></button>)}

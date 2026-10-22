@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { requireUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { AccountBodyError, readAccountBody } from "@/lib/account-security";
-import { ACTIONS, ACTION_COOLDOWN_MS, applyAction, evolvePet, isColor, isTheme, type PetAction } from "@/lib/game";
+import { ACTIONS, ACTION_COOLDOWN_MS, actionBlocked, applyAction, evolvePet, validTz, isColor, isTheme, type PetAction } from "@/lib/game";
 import { consumeRateLimit, enforceSameOrigin } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
@@ -12,12 +12,13 @@ function json(body: unknown, status = 200) {
   return NextResponse.json(body, { status, headers: { "Cache-Control": "private, no-store" } });
 }
 
-export async function GET() {
+export async function GET(request: Request) {
+  const tz = validTz(new URL(request.url).searchParams.get("tz"));
   const user = await requireUser();
   if (!user) return json({ error: "Entre em uma conta confirmada e ativa." }, 401);
   const pet = await db.pet.findUnique({ where: { userId: user.id } });
   const now = new Date();
-  return json({ pet: pet ? { ...evolvePet(pet, pet.updatedAt, now), updatedAt: now.toISOString() } : null });
+  return json({ pet: pet ? { ...evolvePet(pet, pet.updatedAt, now, pet.id, tz), updatedAt: now.toISOString() } : null });
 }
 
 async function mutationContext(request: Request) {
@@ -73,12 +74,15 @@ export async function PATCH(request: Request) {
   const pet = await db.pet.findUnique({ where: { userId: user.id } });
   if (!pet) return json({ error: "Adote seu companheiro primeiro." }, 404);
   const now = new Date();
-  const current = evolvePet(pet, pet.updatedAt, now);
+  const tz = validTz(body.tz);
+  const current = evolvePet(pet, pet.updatedAt, now, pet.id, tz);
   let data;
   if (typeof body.action === "string" && ACTIONS.includes(body.action as PetAction)) {
     if (pet.lastActionAt && now.getTime() - pet.lastActionAt.getTime() < ACTION_COOLDOWN_MS) {
       return json({ error: "Um carinho por vez! Espere 10 segundos entre os cuidados." }, 429);
     }
+    const blocked = actionBlocked(current, pet.id, body.action as PetAction, now, tz);
+    if (blocked) return json({ error: blocked }, 409);
     const next = applyAction(current, body.action as PetAction);
     data = { hunger: next.hunger, happiness: next.happiness, energy: next.energy, cleanliness: next.cleanliness, lastActionAt: now };
   } else {
