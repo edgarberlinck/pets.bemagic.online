@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 
 type InstallPrompt = Event & {
@@ -13,16 +13,113 @@ function applicationKey(value: string): ArrayBuffer {
   return Uint8Array.from(raw, (character) => character.charCodeAt(0)).buffer;
 }
 
-export function PwaControls({ authenticated }: { authenticated: boolean }) {
+export async function browserPushOwnedByAccount(
+  registration: ServiceWorkerRegistration, signal: AbortSignal, accountId?: string,
+) {
+  const subscription = await registration.pushManager.getSubscription();
+  if (!subscription) return false;
+  const response = await fetch("/api/push", {
+    credentials: "same-origin", cache: "no-store", signal,
+    headers: accountId ? { "X-Push-Account": accountId } : undefined,
+  });
+  if (!response.ok) throw new Error("Não foi possível verificar os lembretes desta conta. Tente novamente.");
+  const body = await response.json();
+  return (!accountId || body.accountId === accountId) &&
+    Array.isArray(body.endpoints) && body.endpoints.includes(subscription.endpoint);
+}
+
+export async function enrollBrowserPush(
+  registration: ServiceWorkerRegistration, publicKey: string,
+  assertCurrentAccount: () => void, signal: AbortSignal, accountId?: string,
+) {
+  let created: PushSubscription | null = null;
+  const subscribe = async () => {
+    assertCurrentAccount();
+    created = await registration.pushManager.subscribe({
+      userVisibleOnly: true, applicationServerKey: applicationKey(publicKey),
+    });
+    assertCurrentAccount();
+    return created;
+  };
+  const save = async (subscription: PushSubscription) => {
+    assertCurrentAccount();
+    return fetch("/api/push", {
+      method: "POST", headers: {
+        "Content-Type": "application/json", ...(accountId ? { "X-Push-Account": accountId } : {}),
+      },
+      credentials: "same-origin", body: JSON.stringify(subscription.toJSON()), signal,
+    });
+  };
+  try {
+    let subscription = await registration.pushManager.getSubscription();
+    assertCurrentAccount();
+    if (!subscription) subscription = await subscribe();
+    let response = await save(subscription);
+    assertCurrentAccount();
+    if (response.status === 409 && !created) {
+      const body = await response.json();
+      assertCurrentAccount();
+      if (body.code === "endpoint_owned") {
+        // Only an explicit opt-in rotates another account's browser subscription.
+        // Its database record is never transferred or deleted by this account.
+        if (!await subscription.unsubscribe()) throw new Error("Não foi possível preparar este dispositivo.");
+        assertCurrentAccount();
+        subscription = await subscribe();
+        response = await save(subscription);
+        assertCurrentAccount();
+      }
+    }
+    if (!response.ok)
+      throw new Error(response.status === 429 ? "Muitas tentativas. Tente mais tarde." :
+        "Não foi possível ativar. Confirme sua conta e tente novamente.");
+  } catch (error) {
+    if (created) await (created as PushSubscription).unsubscribe().catch(() => false);
+    throw error;
+  }
+}
+
+export function PwaControls({ authenticated, accountId }: { authenticated: boolean; accountId?: string }) {
   const [installPrompt, setInstallPrompt] = useState<InstallPrompt | null>(null);
   const [standalone, setStandalone] = useState(false);
   const [ios, setIos] = useState(false);
   const [supported, setSupported] = useState<boolean | null>(null);
   const [registration, setRegistration] = useState<ServiceWorkerRegistration | null>(null);
-  const [subscribed, setSubscribed] = useState(false);
+  const [subscribedAccount, setSubscribedAccount] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const vapid = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
+  const accountKey = authenticated ? accountId ?? "current-account" : null;
+  const subscribed = !!accountKey && subscribedAccount === accountKey;
+  const currentAccount = useRef(accountKey);
+  const ownershipRequest = useRef<AbortController | null>(null);
+  const mutationRequest = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    currentAccount.current = accountKey;
+    return () => {
+      currentAccount.current = null;
+      mutationRequest.current?.abort();
+    };
+  }, [accountKey]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    ownershipRequest.current = controller;
+    const reconcile = async () => {
+      setSubscribedAccount(null);
+      setMessage("");
+      if (!accountKey || !registration || !supported) return;
+      try {
+        const owned = await browserPushOwnedByAccount(registration, controller.signal, accountId);
+        if (!controller.signal.aborted) setSubscribedAccount(owned ? accountKey : null);
+      } catch {
+        if (!controller.signal.aborted)
+          setMessage("Não foi possível verificar os lembretes desta conta. Tente ativar novamente.");
+      }
+    };
+    void reconcile();
+    return () => controller.abort();
+  }, [accountId, accountKey, registration, supported]);
 
   useEffect(() => {
     let active = true;
@@ -48,10 +145,6 @@ export function PwaControls({ authenticated }: { authenticated: boolean }) {
         });
         if (!active) return;
         setRegistration(registered);
-        if (capable) {
-          const subscription = await registered.pushManager.getSubscription();
-          if (active) setSubscribed(!!subscription);
-        }
       } catch {
         if (active) setMessage("Não foi possível preparar o aplicativo. Tente recarregar a página.");
       }
@@ -81,52 +174,54 @@ export function PwaControls({ authenticated }: { authenticated: boolean }) {
   }
 
   async function togglePush() {
-    if (!registration || !authenticated || !supported) return;
+    if (!registration || !accountKey || !supported) return;
+    ownershipRequest.current?.abort();
+    const controller = new AbortController();
+    mutationRequest.current = controller;
+    const assertCurrentAccount = () => {
+      if (controller.signal.aborted || currentAccount.current !== accountKey)
+        throw new Error("A conta mudou. Tente novamente.");
+    };
     setBusy(true);
     setMessage("");
-    let created: PushSubscription | null = null;
     try {
-      let subscription = await registration.pushManager.getSubscription();
+      const subscription = await registration.pushManager.getSubscription();
+      assertCurrentAccount();
       if (subscribed && !subscription) {
-        setSubscribed(false);
+        setSubscribedAccount(null);
         setMessage("Notificações já desativadas neste navegador.");
         return;
       }
       if (subscribed && subscription) {
         const response = await fetch("/api/push", {
-          method: "DELETE", headers: { "Content-Type": "application/json" },
+          method: "DELETE", headers: {
+            "Content-Type": "application/json", ...(accountId ? { "X-Push-Account": accountId } : {}),
+          },
           credentials: "same-origin", body: JSON.stringify({ endpoint: subscription.endpoint }),
+          signal: controller.signal,
         });
+        assertCurrentAccount();
         if (!response.ok) throw new Error("Não foi possível desativar. Tente novamente.");
         if (!await subscription.unsubscribe()) throw new Error("Tente desativar novamente.");
-        setSubscribed(false);
+        assertCurrentAccount();
+        setSubscribedAccount(null);
         setMessage("Notificações desativadas neste dispositivo.");
         return;
       }
       if (!vapid) throw new Error("Notificações ainda não configuradas.");
       // Permission is requested only inside this explicit user click.
       const permission = await Notification.requestPermission();
+      assertCurrentAccount();
       if (permission !== "granted")
         throw new Error("Permissão não concedida. Você pode alterá-la nas configurações do navegador.");
       if (!registration.active) throw new Error("Aguarde a instalação do aplicativo e tente novamente.");
-      if (!subscription) {
-        subscription = await registration.pushManager.subscribe({
-          userVisibleOnly: true, applicationServerKey: applicationKey(vapid),
-        });
-        created = subscription;
-      }
-      const response = await fetch("/api/push", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        credentials: "same-origin", body: JSON.stringify(subscription.toJSON()),
-      });
-      if (!response.ok)
-        throw new Error(response.status === 429 ? "Muitas tentativas. Tente mais tarde." :
-          "Não foi possível ativar. Confirme sua conta e tente novamente.");
-      setSubscribed(true);
+      await enrollBrowserPush(registration, vapid, assertCurrentAccount, controller.signal, accountId);
+      assertCurrentAccount();
+      setSubscribedAccount(accountKey);
       setMessage("Notificações ativadas! Avisaremos quando seu pet precisar de carinho.");
     } catch (error) {
-      if (created) await created.unsubscribe().catch(() => false);
-      setMessage(error instanceof Error ? error.message : "Não foi possível alterar as notificações.");
+      if (currentAccount.current === accountKey && !controller.signal.aborted)
+        setMessage(error instanceof Error ? error.message : "Não foi possível alterar as notificações.");
     } finally { setBusy(false); }
   }
 

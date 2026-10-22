@@ -1,20 +1,20 @@
 import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
-import { accountRisk, hashPassword, isDisposableEmail, normalizeEmail, sendVerificationEmail, validatePassword } from "@/lib/account-security";
+import { AccountBodyError, accountRisk, hashPassword, isDisposableEmail, normalizeEmail, readAccountBody, sendVerificationEmail, validatePassword } from "@/lib/account-security";
 import { enforceSameOrigin, rateLimit } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
-const message = "If this address is eligible, a verification email will arrive shortly. You can request another email if needed.";
+const message = "Se este endereço puder receber a confirmação, um e-mail chegará em breve. Você pode solicitar outro envio se precisar.";
 
 export async function POST(request: Request) {
-  if (!enforceSameOrigin(request)) return Response.json({ error: "Invalid origin." }, { status: 403 });
+  if (!enforceSameOrigin(request)) return Response.json({ error: "Origem inválida." }, { status: 403 });
   try {
     if (!await rateLimit(request, "register", 10, 60 * 60_000))
-      return Response.json({ error: "Please try again later." }, { status: 429 });
-    const body = await request.json();
+      return Response.json({ error: "Tente novamente mais tarde." }, { status: 429 });
+    const body = await readAccountBody(request);
     const email = normalizeEmail(body?.email);
     if (!email || isDisposableEmail(email) || !validatePassword(body?.password))
-      return Response.json({ error: "Use a permanent email address and a password of 12–128 characters." }, { status: 400 });
+      return Response.json({ error: "Use um e-mail permanente e uma senha de 12 a 128 caracteres." }, { status: 400 });
     const passwordHash = await hashPassword(body.password);
     const risk = accountRisk(email);
     try {
@@ -27,7 +27,7 @@ export async function POST(request: Request) {
     }
     return Response.json({ message }, { status: 202 });
   } catch (error) {
-    if (error instanceof SyntaxError) return Response.json({ error: "Invalid request." }, { status: 400 });
-    return Response.json({ error: "Service temporarily unavailable." }, { status: 503 });
+    if (error instanceof AccountBodyError) return Response.json({ error: error.message }, { status: error.status });
+    return Response.json({ error: "Serviço temporariamente indisponível." }, { status: 503 });
   }
 }

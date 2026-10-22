@@ -13,7 +13,7 @@ export const authOptions: NextAuthOptions = {
   pages: { signIn: "/" },
   providers: [
     CredentialsProvider({
-      name: "Email and password",
+      name: "E-mail e senha",
       credentials: { email: { type: "email" }, password: { type: "password" } },
       async authorize(credentials, request) {
         const email = normalizeEmail(credentials?.email);

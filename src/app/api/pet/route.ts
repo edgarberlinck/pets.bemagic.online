@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireUser } from "@/lib/auth";
 import { db } from "@/lib/db";
+import { AccountBodyError, readAccountBody } from "@/lib/account-security";
 import { ACTIONS, ACTION_COOLDOWN_MS, applyAction, evolvePet, isColor, isTheme, type PetAction } from "@/lib/game";
 import { consumeRateLimit, enforceSameOrigin } from "@/lib/rate-limit";
 
@@ -30,16 +31,11 @@ async function mutationContext(request: Request) {
     });
     return json({ error: "Muitos cuidados de uma vez. Espere um minutinho." }, 429);
   }
-  if (Number(request.headers.get("content-length")) > 4096) return json({ error: "Dados muito grandes." }, 413);
   let body: Record<string, unknown>;
   try {
-    const raw = await request.text();
-    if (raw.length > 4096) return json({ error: "Dados muito grandes." }, 413);
-    const parsed: unknown = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return json({ error: "Dados inválidos." }, 400);
-    body = parsed as Record<string, unknown>;
-  } catch {
-    return json({ error: "Dados inválidos." }, 400);
+    body = await readAccountBody(request);
+  } catch (error) {
+    return json({ error: error instanceof AccountBodyError ? error.message : "Dados inválidos." }, error instanceof AccountBodyError ? error.status : 400);
   }
   return { user, body };
 }

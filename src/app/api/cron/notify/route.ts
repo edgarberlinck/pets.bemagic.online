@@ -1,5 +1,6 @@
 import webPush from "web-push";
 import { db } from "@/lib/db";
+import { evolvePet } from "@/lib/game";
 import { cronAuthorized, parsePushSubscription, petNeedsCare } from "@/lib/push";
 
 export const runtime = "nodejs";
@@ -20,21 +21,36 @@ export async function GET(request: Request) {
     const now = new Date();
     const day = new Date(now);
     day.setUTCHours(0, 0, 0, 0);
-    const users = await db.user.findMany({
-      where: {
-        blocked: false, emailVerified: { not: null }, pet: { isNot: null },
-        pushSubscriptions: {
-          some: {}, none: { lastNotifiedAt: { gte: day } },
-        },
-      },
-      select: { id: true, pet: true },
-      orderBy: { pet: { updatedAt: "asc" } },
-      take: 20,
-    });
+    // Derive rates from the shared evolution function; filter before the batch
+    // limit, and prioritize least-recently notified owners to avoid starvation.
+    const afterHour = evolvePet(
+      { hunger: 100, happiness: 100, energy: 100, cleanliness: 100 },
+      new Date(now.getTime() - 3_600_000), now,
+    );
+    const users = await db.$queryRaw<{ id: string }[]>`
+      SELECT u."id"
+      FROM "User" u
+      JOIN "Pet" p ON p."userId" = u."id"
+      JOIN "PushSubscription" s ON s."userId" = u."id"
+      CROSS JOIN LATERAL (
+        SELECT LEAST(48.0, GREATEST(0.0,
+          EXTRACT(EPOCH FROM (${now}::timestamp - p."updatedAt")) / 3600.0)) AS hours
+      ) elapsed
+      WHERE u."blocked" = false AND u."emailVerified" IS NOT NULL
+        AND LEAST(
+          p."hunger" - elapsed.hours * ${100 - afterHour.hunger},
+          p."happiness" - elapsed.hours * ${100 - afterHour.happiness},
+          p."energy" - elapsed.hours * ${100 - afterHour.energy},
+          p."cleanliness" - elapsed.hours * ${100 - afterHour.cleanliness}
+        ) <= 30
+      GROUP BY u."id", p."id"
+      HAVING MAX(s."lastNotifiedAt") IS NULL OR MAX(s."lastNotifiedAt") < ${day}
+      ORDER BY MAX(s."lastNotifiedAt") ASC NULLS FIRST, p."updatedAt" ASC, u."id" ASC
+      LIMIT 20
+    `;
     let sent = 0;
     for (let offset = 0; offset < users.length; offset += 5) {
       await Promise.all(users.slice(offset, offset + 5).map(async (candidate) => {
-        if (!candidate.pet || !petNeedsCare(candidate.pet, now)) return;
         const subscriptions = await db.$transaction(async (tx) => {
           // Lock per owner, not per subscription: concurrent cron runs reserve once.
           await tx.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(hashtext(${candidate.id}))`;

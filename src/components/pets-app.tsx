@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { AccountPanel } from "@/components/account-panel";
+import { VerifyAccount } from "@/components/verify-account";
 import { PixelPet } from "@/components/pixel-pet";
 import { PwaControls } from "@/components/pwa-controls";
 import { ACTIONS, applyAction, evolvePet, isTheme, petMood, THEMES, type GamePet, type PetAction, type ThemeName } from "@/lib/game";
@@ -24,7 +25,7 @@ const care = [
   { action: "clean", label: "Dar banho", hint: "Limpinho e feliz", icon: Droplets, color: "blue" },
 ] as const;
 
-export function PetsApp({ verification = "" }: { verification?: string }) {
+export function PetsApp({ verification = "", verificationToken }: { verification?: string; verificationToken?: string }) {
   const { data: session, status } = useSession();
   const authenticated = status === "authenticated";
   const [pet, setPet] = useState<GamePet>(demo);
@@ -120,6 +121,7 @@ export function PetsApp({ verification = "" }: { verification?: string }) {
         </section>
 
         {verification && <p className="notice" role="status">{verification}</p>}
+        {verificationToken && <VerifyAccount token={verificationToken} />}
         <div id="seu-pet" className="game-heading">
           <div><span className="eyebrow">SEU CANTINHO DE FELICIDADE</span><h2>{authenticated ? "Que bom ter você por aqui!" : "Conheça a Pipoca"}</h2></div>
           <span className="mode-tag"><span className="status-dot" /> {authenticated ? hasPet ? "Progresso na nuvem" : "Pronto para adotar" : "Modo demonstração"}</span>
@@ -186,7 +188,7 @@ export function PetsApp({ verification = "" }: { verification?: string }) {
 
         {!authenticated && <AccountPanel />}
         {authenticated && <p className="signed-in">Seu cantinho está conectado como {session?.user?.email}.</p>}
-        <PwaControls authenticated={authenticated} />
+        <PwaControls authenticated={authenticated} accountId={session?.user?.id} />
       </main>
 
       <footer><Link href="/" className="brand"><PawPrint size={18} /> bemagic<span className="brand-pets">pets</span></Link><p>Feito de pixels, magia e um montão de carinho.</p><span>Um pequeno cuidado por vez <Heart size={13} /></span></footer>

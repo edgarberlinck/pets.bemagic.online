@@ -1,15 +1,15 @@
 import { db } from "@/lib/db";
-import { hashToken, normalizeEmail, sendVerificationEmail } from "@/lib/account-security";
+import { AccountBodyError, hashToken, normalizeEmail, readAccountBody, sendVerificationEmail } from "@/lib/account-security";
 import { consumeRateLimit, enforceSameOrigin, rateLimit } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
-  if (!enforceSameOrigin(request)) return Response.json({ error: "Invalid origin." }, { status: 403 });
+  if (!enforceSameOrigin(request)) return Response.json({ error: "Origem inválida." }, { status: 403 });
   try {
     if (!await rateLimit(request, "resend", 15, 60 * 60_000))
-      return Response.json({ error: "Please try again later." }, { status: 429 });
-    const body = await request.json();
+      return Response.json({ error: "Tente novamente mais tarde." }, { status: 429 });
+    const body = await readAccountBody(request);
     const email = normalizeEmail(body?.email);
     if (email && await consumeRateLimit(`resend:email:${hashToken(email)}`, 5, 15 * 60_000)) {
       const user = await db.user.findUnique({ where: { email } });
@@ -23,9 +23,9 @@ export async function POST(request: Request) {
         }
       }
     }
-    return Response.json({ message: "If this address is eligible, a verification email will arrive shortly." }, { status: 202 });
+    return Response.json({ message: "Se este endereço puder receber a confirmação, um e-mail chegará em breve." }, { status: 202 });
   } catch (error) {
-    if (error instanceof SyntaxError) return Response.json({ error: "Invalid request." }, { status: 400 });
-    return Response.json({ error: "Service temporarily unavailable." }, { status: 503 });
+    if (error instanceof AccountBodyError) return Response.json({ error: error.message }, { status: error.status });
+    return Response.json({ error: "Serviço temporariamente indisponível." }, { status: 503 });
   }
 }

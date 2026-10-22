@@ -22,7 +22,7 @@ npm run dev
 
 Abra http://localhost:3000. Gere `NEXTAUTH_SECRET` com `openssl rand -base64 32`. O Prisma carrega `.env` pela configuração; não envie esse arquivo ao Git.
 
-Para criar conta, configure uma chave Resend e `EMAIL_FROM` em um domínio remetente verificado. Os links expiram em uma hora e são de uso único; a tela permite reenviar. Sem serviço de email configurado, é possível explorar a demonstração e usar o CLI para criar um administrador, mas contas comuns precisam confirmar seu email para entrar.
+Para criar conta, configure uma chave Resend e `EMAIL_FROM` em um domínio remetente verificado. Os links expiram em uma hora e são de uso único; a tela permite reenviar. Abrir o link não ativa a conta: o titular precisa definir a senha definitiva para concluir a confirmação. Essa senha substitui a informada no cadastro, impedindo que um pré-cadastro feito por outra pessoa dê acesso à conta. Sem serviço de email configurado, é possível explorar a demonstração e usar o CLI para criar um administrador, mas contas comuns precisam confirmar seu email para entrar.
 
 ```sh
 npm run lint
@@ -32,7 +32,16 @@ npm run build
 npm start
 ```
 
-Os testes de integração do backend são opcionais: use um **banco descartável migrado**, defina `DATABASE_URL` e execute `BACKEND_INTEGRATION_TEST=1 npm test`. Eles criam e removem registros temporários. Não execute contra produção.
+Os testes de integração são opcionais: use um **banco descartável migrado**, defina `DATABASE_URL` e habilite os cenários desejados:
+
+```sh
+BACKEND_INTEGRATION_TEST=1 npm test
+PUSH_INTEGRATION_TEST=1 npm test
+# Requer npm run build antes; inicia um servidor HTTP isolado na porta 3011.
+PET_HTTP_INTEGRATION=1 npm test
+```
+
+Os cenários verificam confirmação de email, limites persistentes, cron, sessões reais e isolamento dos pets. Eles criam e removem registros temporários. Não execute contra produção.
 
 ## Vercel
 

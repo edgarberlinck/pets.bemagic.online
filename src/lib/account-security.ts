@@ -86,6 +86,46 @@ export function isSameOrigin(request: Request): boolean {
   }
 }
 
+export class AccountBodyError extends Error {
+  constructor(public readonly status: 400 | 413, message: string) {
+    super(message);
+    this.name = "AccountBodyError";
+  }
+}
+
+/** Reads a JSON object with a 4096-byte streaming limit; throws AccountBodyError (400/413). */
+export async function readAccountBody(request: Request): Promise<Record<string, unknown>> {
+  const maximum = 4096;
+  const length = request.headers.get("content-length");
+  if (length && /^\d+$/.test(length) && Number(length) > maximum)
+    throw new AccountBodyError(413, "Os dados enviados são muito grandes.");
+  if (!request.body) throw new AccountBodyError(400, "Dados inválidos.");
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > maximum) {
+        await reader.cancel().catch(() => undefined);
+        throw new AccountBodyError(413, "Os dados enviados são muito grandes.");
+      }
+      chunks.push(value);
+    }
+    const parsed: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, bytes)));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      throw new AccountBodyError(400, "Envie um objeto JSON válido.");
+    return parsed as Record<string, unknown>;
+  } catch (error) {
+    if (error instanceof AccountBodyError) throw error;
+    throw new AccountBodyError(400, "Dados inválidos.");
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 export async function sendVerificationEmail(user: { id: string; email: string }): Promise<void> {
   if (!process.env.RESEND_API_KEY || !process.env.EMAIL_FROM || !process.env.NEXTAUTH_URL)
     throw new Error("Email service not configured");
@@ -104,8 +144,8 @@ export async function sendVerificationEmail(user: { id: string; email: string })
       body: JSON.stringify({
         from: process.env.EMAIL_FROM,
         to: [user.email],
-        subject: "Verify your BeMagic Pets email",
-        text: `Welcome! Verify your email within one hour:\n\n${url.toString()}\n\nIf you didn't create this account, ignore this email.`,
+        subject: "Confirme seu e-mail no BeMagic Pets",
+        text: `Boas-vindas ao BeMagic Pets! Acesse o link em até uma hora para confirmar seu e-mail e definir sua senha:\n\n${url.toString()}\n\nSomente a senha definida nessa confirmação poderá acessar sua conta. Se você não criou esta conta, ignore esta mensagem.`,
       }),
       signal: AbortSignal.timeout(10_000),
     });

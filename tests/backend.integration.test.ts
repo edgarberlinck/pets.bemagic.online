@@ -6,7 +6,7 @@ import { createVerificationToken, hashPassword, hashToken } from "../src/lib/acc
 import { consumeRateLimit } from "../src/lib/rate-limit";
 import { POST as register } from "../src/app/api/auth/register/route";
 import { POST as resend } from "../src/app/api/auth/resend/route";
-import { GET as verify } from "../src/app/api/auth/verify/route";
+import { GET as verify, POST as activate } from "../src/app/api/auth/verify/route";
 import { authOptions } from "../src/lib/auth";
 import type { CredentialsConfig } from "next-auth/providers/credentials";
 
@@ -65,13 +65,48 @@ test("PostgreSQL registration, verification, retry and durable limit integration
       "earlier delivered links remain usable");
     globalThis.fetch = originalFetch;
     const response = await verify(new Request(`https://pets.example.com/api/auth/verify?token=${token.token}`));
-    assert.equal(response.headers.get("location"), "https://pets.example.com/?verified=1");
-    const reused = await verify(new Request(`https://pets.example.com/api/auth/verify?token=${token.token}`));
-    assert.equal(reused.headers.get("location"), "https://pets.example.com/?verified=invalid");
-    assert.ok((await db.user.findUniqueOrThrow({ where: { email } })).emailVerified);
-    assert.equal((await login())?.id, user.id, "verified credentials can sign in");
+    assert.equal(response.headers.get("location"), `https://pets.example.com/?verification=${token.token}`);
+    assert.equal(response.headers.get("referrer-policy"), "no-referrer");
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal((await db.user.findUniqueOrThrow({ where: { email } })).emailVerified, null,
+      "opening a link never activates a preregistrant's password");
+    assert.ok(await db.verificationToken.findUnique({ where: { tokenHash: token.tokenHash } }),
+      "GET does not consume the verification token");
+    assert.equal(await login(), null);
+    const chosenPassword = "legitimate owner passphrase 456!";
+    const expired = createVerificationToken();
+    await db.verificationToken.create({
+      data: { userId: user.id, tokenHash: expired.tokenHash, expiresAt: new Date(0) },
+    });
+    const expiredResponse = await activate(request({ token: expired.token, password: chosenPassword }));
+    assert.equal(expiredResponse.status, 400);
+    const genericInvalid = await expiredResponse.json();
     await db.user.update({ where: { id: user.id }, data: { blocked: true } });
-    assert.equal(await login(), null, "blocked users cannot sign in");
+    const blockedResponse = await activate(request({ token: token.token, password: chosenPassword }));
+    assert.equal(blockedResponse.status, 400);
+    assert.deepEqual(await blockedResponse.json(), genericInvalid);
+    await db.user.update({ where: { id: user.id }, data: { blocked: false } });
+    assert.equal((await activate(new Request("https://pets.example.com", {
+      method: "POST", body: JSON.stringify({ token: token.token, password: chosenPassword }),
+    }))).status, 403);
+    assert.equal((await activate(request({ token: token.token, password: "short" }))).status, 400);
+    const activated = await Promise.all([
+      activate(request({ token: token.token, password: chosenPassword })),
+      activate(request({ token: token.token, password: chosenPassword })),
+    ]);
+    assert.deepEqual(activated.map((result) => result.status).sort(), [200, 400],
+      "only one concurrent activation can consume the token");
+    const replay = await activate(request({ token: token.token, password: chosenPassword }));
+    assert.equal(replay.status, 400);
+    assert.deepEqual(await replay.json(), genericInvalid);
+    assert.ok((await db.user.findUniqueOrThrow({ where: { email } })).emailVerified);
+    assert.equal((await db.user.findUniqueOrThrow({ where: { email } })).sessionVersion, 1);
+    assert.equal(await db.verificationToken.count({ where: { userId: user.id } }), 0,
+      "activation invalidates every pending link for the account");
+    assert.equal(await login(), null, "attacker's preregistration password is never activated");
+    assert.equal((await login(chosenPassword))?.id, user.id, "only the email holder's chosen password can sign in");
+    await db.user.update({ where: { id: user.id }, data: { blocked: true } });
+    assert.equal(await login(chosenPassword), null, "blocked users cannot sign in");
     await db.user.update({ where: { id: user.id }, data: { blocked: false } });
     for (let index = 0; index < 5; index++) assert.equal(await login("incorrect password"), null);
     const flagged = await db.user.findUniqueOrThrow({ where: { email } });
@@ -79,11 +114,14 @@ test("PostgreSQL registration, verification, retry and durable limit integration
     assert.equal(flagged.suspiciousScore, 50);
     assert.deepEqual(flagged.suspiciousReasons, ["Repeated failed logins"]);
 
-    const expired = createVerificationToken();
+    const confirmed = createVerificationToken();
     await db.verificationToken.create({
-      data: { userId: user.id, tokenHash: expired.tokenHash, expiresAt: new Date(0) },
+      data: { userId: user.id, tokenHash: confirmed.tokenHash, expiresAt: confirmed.expiresAt },
     });
-    assert.equal((await verify(new Request(`https://pets.example.com/api/auth/verify?token=${expired.token}`))).headers.get("location"),
+    const confirmedResponse = await activate(request({ token: confirmed.token, password: chosenPassword }));
+    assert.equal(confirmedResponse.status, 400);
+    assert.deepEqual(await confirmedResponse.json(), genericInvalid);
+    assert.equal((await verify(new Request("https://pets.example.com/api/auth/verify?token=invalid"))).headers.get("location"),
       "https://pets.example.com/?verified=invalid");
 
     const results = await Promise.all(Array.from({ length: 12 }, () => consumeRateLimit(rateKey, 5, 60_000)));
@@ -109,7 +147,7 @@ test("PostgreSQL registration, verification, retry and durable limit integration
     await db.user.deleteMany({ where: { email } });
     await db.rateLimit.deleteMany({ where: { key: { in: [
       rateKey, `resend:email:${hashToken(email)}`, `login:email:${hashToken(email)}`,
-      `register:${clientHash}`, `resend:${clientHash}`, `login:client:${clientHash}`,
+      `register:${clientHash}`, `resend:${clientHash}`, `login:client:${clientHash}`, `verify-activate:${clientHash}`,
     ] } } });
     if (previousUrl === undefined) delete process.env.NEXTAUTH_URL;
     else process.env.NEXTAUTH_URL = previousUrl;

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  accountRisk, createVerificationToken, hashPassword, hashToken, isDisposableEmail,
-  isSameOrigin, normalizeEmail, trustedClientKey, validatePassword, verifyPassword,
+  AccountBodyError, accountRisk, createVerificationToken, hashPassword, hashToken, isDisposableEmail,
+  isSameOrigin, normalizeEmail, readAccountBody, trustedClientKey, validatePassword, verifyPassword,
 } from "../src/lib/account-security";
 
 test("email normalization rejects malformed addresses and normalizes case", () => {
@@ -85,4 +85,39 @@ test("mutation origin uses configured URL, never spoofable host headers", () => 
     if (previous === undefined) delete process.env.NEXTAUTH_URL;
     else process.env.NEXTAUTH_URL = previous;
   }
+});
+
+test("account JSON reader accepts objects and rejects invalid JSON or non-object bodies", async () => {
+  const request = (body: string) => new Request("https://pets.example", { method: "POST", body });
+  assert.deepEqual(await readAccountBody(request('{"email":"pessoa@example.com"}')), { email: "pessoa@example.com" });
+  for (const body of ["", "invalid", "[]", "null", '"text"', "12"])
+    await assert.rejects(readAccountBody(request(body)), (error) => error instanceof AccountBodyError && error.status === 400);
+});
+
+test("account JSON reader limits actual UTF-8 bytes and rejects oversized Content-Length", async () => {
+  const body = JSON.stringify({ value: "x".repeat(4084) });
+  assert.equal(Buffer.byteLength(body), 4096);
+  assert.equal((await readAccountBody(new Request("https://pets.example", { method: "POST", body }))).value,
+    "x".repeat(4084));
+  for (const init of [
+    { body: JSON.stringify({ value: "🐱".repeat(1100) }) },
+    { body: "{}", headers: { "content-length": "4097" } },
+    { body: JSON.stringify({ value: "x".repeat(4096) }), headers: { "content-length": "1" } },
+  ]) await assert.rejects(readAccountBody(new Request("https://pets.example", { method: "POST", ...init })),
+    (error) => error instanceof AccountBodyError && error.status === 413);
+});
+
+test("account JSON reader cancels oversized streams rather than reading the entire upload", async () => {
+  let reads = 0;
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) { reads++; controller.enqueue(new Uint8Array(2048)); },
+    cancel() { cancelled = true; },
+  });
+  const request = new Request("https://pets.example", {
+    method: "POST", body, duplex: "half", headers: { "content-length": "1" },
+  } as RequestInit & { duplex: "half" });
+  await assert.rejects(readAccountBody(request), (error) => error instanceof AccountBodyError && error.status === 413);
+  assert.equal(cancelled, true);
+  assert.ok(reads <= 4);
 });
